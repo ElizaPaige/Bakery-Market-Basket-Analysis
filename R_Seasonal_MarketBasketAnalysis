@@ -1,0 +1,1126 @@
+Seasonal market Basket Analysis:
+
+
+```{r}
+library(arules)
+library(arulesViz)
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+library(arules)
+library(readxl)
+library(corrplot)
+library(DT)
+
+# Compact output settings
+opts_chunk$set(
+  fig.width = 10,     # Increased from 6
+  fig.height = 8,     # Increased from 4
+  fig.align = 'center',
+  out.width = '100%', 
+  echo = FALSE,      
+  warning = FALSE,   
+  message = FALSE    
+)
+
+# Helper function to save high-quality plots with proper dimensions
+save_high_quality_plot <- function(plot_obj, filename, width = 10, height = 8, res = 120) {
+  png(filename, width = width, height = height, units = "in", res = res)
+  print(plot_obj)
+  dev.off()
+}
+
+library(readxl)
+
+# Load data -  SeasonalFinal
+SeasonalFinal <- read_excel("~/Desktop/BAN 530 Final Project/Data/SeasonalFinal.xlsx")
+names(SeasonalFinal) <- make.names(names(SeasonalFinal), unique = TRUE)
+```
+
+Transaction Creation and Market Basket Analysis
+```{r}
+# FIXED: Changed from YearRound to SeasonalFinal 
+transactions_df <- SeasonalFinal %>%
+  select(Name, Lineitem.name) %>%
+  distinct()
+
+transaction_list <- split(transactions_df$Lineitem.name, transactions_df$Name)
+transactions <- as(transaction_list, "transactions")
+```
+
+```{r}
+perform_market_basket_analysis <- function(transactions, 
+                                           support_threshold = 0.005, 
+                                           confidence_threshold = 0.2, 
+                                           lift_threshold = 2) {
+  # Generate Association Rules
+  rules <- apriori(
+    transactions,
+    parameter = list(
+      support = support_threshold,
+      confidence = confidence_threshold,
+      minlen = 2
+    )
+  )
+  
+  # Filter Rules
+  significant_rules <- rules[quality(rules)$lift > lift_threshold]
+  
+  # Sort and Return Top Rules
+  if (length(significant_rules) > 0) {
+    top_rules <- sort(significant_rules, by = "lift")[1:min(20, length(significant_rules))]
+    return(top_rules)
+  } else {
+    return(NULL)
+  }
+}
+
+# Execute Market Basket Analysis
+market_basket_rules <- perform_market_basket_analysis(transactions)
+```
+
+```{r}
+# Calculate product revenue - FIXED: Changed from YearRound to SeasonalFinal
+product_revenue <- SeasonalFinal %>%
+  group_by(Lineitem.name) %>%
+  summarize(
+    TotalQuantity = sum(Lineitem.quantity, na.rm = TRUE),
+    AveragePrice = mean(Lineitem.price, na.rm = TRUE),
+    TotalRevenue = sum(Lineitem.quantity * Lineitem.price, na.rm = TRUE),
+    TransactionCount = n_distinct(Name),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(TotalRevenue))
+
+# Get top revenue products
+top_revenue_products <- product_revenue %>%
+  top_n(10, TotalRevenue) %>%
+  pull(Lineitem.name)
+```
+
+Top Products by Revenue
+```{r}
+# Display top revenue products
+top_rev_table <- product_revenue %>% 
+  top_n(10, TotalRevenue) %>% 
+  select(Lineitem.name, TotalRevenue, TransactionCount)
+
+knitr::kable(
+  top_rev_table,
+  col.names = c("Product", "Revenue ($)", "Transaction Count"),
+  caption = "Top 10 Revenue-Generating Products",
+  digits = 2
+)
+```
+
+Product Association Analysis
+```{r}
+if (!is.null(market_basket_rules)) {
+  # Create recommendation table
+  recommendation_table <- data.frame(
+    "If_Customer_Buys" = labels(lhs(market_basket_rules)),
+    "Recommend" = labels(rhs(market_basket_rules)),
+    "Support_Pct" = round(quality(market_basket_rules)$support * 100, 2),
+    "Confidence_Pct" = round(quality(market_basket_rules)$confidence * 100, 2),
+    "Lift" = round(quality(market_basket_rules)$lift, 2),
+    "Transaction_Count" = quality(market_basket_rules)$count
+  )
+  
+  # Sort by lift (strongest associations first)
+  recommendation_table <- recommendation_table[order(-recommendation_table$Lift),]
+  
+  # Display top 10 recommendations
+  knitr::kable(
+    recommendation_table[1:2,],
+    col.names = c("If Customer Buys", "Recommend", "Support (%)", "Confidence (%)", "Lift", "Transactions"),
+    caption = "Top 2 Product Recommendations By Association Strength"
+  )
+}
+```
+
+Enhanced Business Value Analysis
+```{r}
+if (!is.null(market_basket_rules)) {
+  # Convert rules to a data frame for easier handling
+  rules_df <- data.frame(
+    rules = paste0("{", labels(lhs(market_basket_rules)), "} => {", labels(rhs(market_basket_rules)), "}"),
+    lhs = labels(lhs(market_basket_rules)),
+    rhs = labels(rhs(market_basket_rules)),
+    support = round(quality(market_basket_rules)$support, 6),
+    confidence = round(quality(market_basket_rules)$confidence, 6),
+    lift = round(quality(market_basket_rules)$lift, 6),
+    count = quality(market_basket_rules)$count
+  )
+  
+  # Extract unique products from rules
+  rule_products <- unique(c(
+    as.character(rules_df$lhs),
+    as.character(rules_df$rhs)
+  ))
+  
+  # Clean up product names (remove any {}, quotes, etc.)
+  rule_products <- gsub("[{}\"']", "", rule_products)
+  
+  # Get revenue information for products in rules
+  rule_products_revenue <- product_revenue %>%
+    filter(Lineitem.name %in% rule_products) %>%
+    arrange(desc(TotalRevenue))
+  
+  # Find high-value associations (rules involving top revenue products)
+  top_revenue_items <- product_revenue %>% 
+    top_n(20, TotalRevenue) %>%  # Increased from 10 to 20 to catch more items
+    pull(Lineitem.name)
+  
+  high_value_rules <- recommendation_table %>%
+    filter(If_Customer_Buys %in% top_revenue_items | Recommend %in% top_revenue_items) %>%
+    arrange(desc(Lift))
+  
+  # Create a function to normalize product names
+  normalize_product_name <- function(name) {
+    name <- gsub("[{}\"']", "", name)   # Remove braces and quotes
+    name <- trimws(name)                # Remove leading/trailing whitespace
+    name <- tolower(name)               # Convert to lowercase
+    name <- gsub(" - .*$", "", name)    # Remove anything after " - "
+    name <- gsub(" discounted$", "", name, ignore.case = TRUE)  # Remove "discounted"
+    return(name)
+  }
+  
+  # Create a mapping between normalized names and original names in revenue data
+  product_name_mapping <- data.frame(
+    original_name = product_revenue$Lineitem.name,
+    normalized_name = sapply(product_revenue$Lineitem.name, normalize_product_name),
+    revenue = product_revenue$TotalRevenue,
+    stringsAsFactors = FALSE
+  )
+  
+  # Function to find revenue by normalized name
+  get_revenue_by_normalized_name <- function(product_name) {
+    norm_name <- normalize_product_name(product_name)
+    matching_products <- product_name_mapping[product_name_mapping$normalized_name == norm_name, ]
+    
+    if(nrow(matching_products) > 0) {
+      # If multiple matches, take the highest revenue
+      return(max(matching_products$revenue))
+    } else {
+      return(0)
+    }
+  }
+  
+  # Create improved business value metric with normalized names
+  recommendation_value <- recommendation_table %>%
+    mutate(
+      If_Customer_Buys_Revenue = sapply(If_Customer_Buys, get_revenue_by_normalized_name),
+      Recommend_Revenue = sapply(Recommend, get_revenue_by_normalized_name),
+      Business_Value_Score = (Lift * Confidence_Pct/100) * 
+                            (If_Customer_Buys_Revenue + Recommend_Revenue)/2
+    ) %>%
+    arrange(desc(Business_Value_Score))
+  
+  # Save results for further analysis
+  write.csv(recommendation_table, "product_recommendations.csv", row.names = FALSE)
+  write.csv(high_value_rules, "high_value_recommendations.csv", row.names = FALSE)
+  write.csv(recommendation_value, "business_value_recommendations.csv", row.names = FALSE)
+}
+```
+
+Revenue Analysis of Products in Association Rules
+```{r}
+if (!is.null(market_basket_rules)) {
+  # Check the actual column names in rule_products_revenue
+  column_names <- names(rule_products_revenue)
+  
+  # Use the actual column names but with nicer labels
+  knitr::kable(
+    head(rule_products_revenue, 10),
+    caption = "Top Revenue Products Involved in Associations"
+  )
+}
+```
+
+Recommendations Ranked by Business Value
+```{r}
+if (!is.null(market_basket_rules)) {
+  knitr::kable(
+    head(recommendation_value %>% 
+         select(If_Customer_Buys, Recommend, Lift, 
+              Confidence_Pct, If_Customer_Buys_Revenue,
+              Recommend_Revenue, Business_Value_Score), 10),
+    col.names = c("If Customer Buys", "Recommend", "Lift", "Confidence (%)", 
+                "Revenue", "Reccomended Rev", "Value Score"),
+    caption = "Recommendations Ranked by Business Value"
+  )
+}
+```
+
+Category-Specific Analysis
+```{r}
+# Define a function to analyze product categories
+analyze_product_category <- function(category_items, transactions, label, silent = TRUE) {
+  if (!silent) cat(paste0("\n\n==== Analysis for ", label, " ====\n"))
+  
+  # Check if category items exist in transactions
+  category_items_in_trans <- category_items[category_items %in% 
+                                           unique(unlist(as(transactions, "list")))]
+  
+  if(length(category_items_in_trans) == 0) {
+    if (!silent) cat("No items from this category found in transactions.\n")
+    return(NULL)
+  }
+  
+  # Find transactions containing any of the category items
+  trans_with_category <- which(sapply(as(transactions, "list"), function(t) {
+    any(category_items_in_trans %in% t)
+  }))
+  
+  if(length(trans_with_category) == 0) {
+    if (!silent) cat("No transactions found containing items from this category.\n")
+    return(NULL)
+  }
+  
+  # Subset transactions
+  category_transactions <- transactions[trans_with_category]
+  
+  if (!silent) {
+    cat("Number of transactions containing this category:", length(trans_with_category), "\n")
+    cat("Percentage of total transactions:", 
+        round(length(trans_with_category)/length(transactions)*100, 2), "%\n\n")
+  }
+  
+  # Run specific analysis for this category
+  category_rules <- apriori(
+    category_transactions,
+    parameter = list(
+      support = 0.01,  # Higher support threshold for category-specific analysis
+      confidence = 0.2,
+      minlen = 2
+    )
+  )
+  
+  if (length(category_rules) > 0) {
+    # Filter to significant rules
+    significant_category_rules <- category_rules[quality(category_rules)$lift > 1.5]
+    
+    if (length(significant_category_rules) > 0) {
+      sorted_rules <- sort(significant_category_rules, by = "lift")
+      if (!silent) {
+        cat("Top associations within this category (sorted by lift):\n")
+        inspect(head(sorted_rules, 10))
+      }
+      return(sorted_rules)
+    }
+  }
+  return(NULL)
+}
+
+# Function to identify product categories
+identify_product_categories <- function(products, min_items = 3) {
+  # More precise category keywords to avoid overlap
+  category_keywords <- list(
+    "Danish" = c("Danish$", "danish", "^Danish"),
+    "Cookies" = c("Cookie", "Cookies", "cookie", "cookies"),
+    "Cakes" = c("Cake$", "Cupcake", "cake$", "cupcake", "cheesecake", "^Cake"),
+    "Bread" = c("Bread", "bread", "Loaf", "Roll$", "Rolls$"),
+    "Pastry" = c("Croissant", "Eclair", "Tart", "Pie$", "Cannoli", "Napoleon", "pie$"),
+    "Muffins" = c("Muffin", "Scone")
+  )
+  
+  # Find products matching each category
+  categories <- list()
+  for (cat_name in names(category_keywords)) {
+    cat_items <- products[sapply(products, function(product) {
+      any(sapply(category_keywords[[cat_name]], function(keyword) {
+        grepl(keyword, product, ignore.case = TRUE)
+      }))
+    })]
+    
+    # Only include categories with sufficient items
+    if (length(cat_items) >= min_items) {
+      categories[[cat_name]] <- cat_items
+    }
+  }
+  
+  return(categories)
+}
+
+# Get unique products and identify categories
+unique_products <- unique(unlist(as(transactions, "list")))
+product_categories <- identify_product_categories(unique_products)
+
+# Run analysis for each category
+category_rules_list <- list()
+for (category_name in names(product_categories)) {
+  category_rules_list[[category_name]] <- analyze_product_category(
+    product_categories[[category_name]], 
+    transactions, 
+    category_name,
+    silent = TRUE
+  )
+}
+
+# Save category analysis results to files
+for (category_name in names(category_rules_list)) {
+  if (!is.null(category_rules_list[[category_name]])) {
+    # Create dataframe
+    cat_rules_df <- data.frame(
+      rules = paste0("{", labels(lhs(category_rules_list[[category_name]])), "} => {", 
+                   labels(rhs(category_rules_list[[category_name]])), "}"),
+      lhs = labels(lhs(category_rules_list[[category_name]])),
+      rhs = labels(rhs(category_rules_list[[category_name]])),
+      support = quality(category_rules_list[[category_name]])$support,
+      confidence = quality(category_rules_list[[category_name]])$confidence,
+      lift = quality(category_rules_list[[category_name]])$lift,
+      count = quality(category_rules_list[[category_name]])$count
+    )
+    
+    # Save to file
+    write.csv(cat_rules_df, 
+             paste0(gsub(" ", "_", tolower(category_name)), "_rules.csv"), 
+             row.names = FALSE)
+  }
+}
+```
+
+Top Revenue Product Analysis
+```{r}
+analyze_item_associations <- function(target_item, transactions, min_support = 0.003) {
+  item_rules <- apriori(
+    transactions,
+    parameter = list(
+      support = min_support,
+      confidence = 0.1,
+      minlen = 2
+    ),
+    appearance = list(
+      rhs = target_item,
+      default = "lhs"
+    )
+  )
+  
+  if (length(item_rules) > 0) {
+    item_rules_lift <- item_rules[quality(item_rules)$lift > 1.1]
+    
+    if (length(item_rules_lift) > 0) {
+      sorted_rules <- sort(item_rules_lift, by = "lift")
+      return(sorted_rules)
+    }
+  }
+  return(NULL)
+}
+# Analyze associations with top revenue product
+top_product <- top_revenue_products[1]  # Top product from the seasonal data
+top_product_rules <- analyze_item_associations(top_product, transactions)
+
+# Helper function that was used
+analyze_item_associations <- function(target_item, transactions, min_support = 0.003) {
+  item_rules <- apriori(
+    transactions,
+    parameter = list(
+      support = min_support,
+      confidence = 0.1,
+      minlen = 2
+    ),
+    appearance = list(
+      rhs = target_item,
+      default = "lhs"
+    )
+  )
+  
+  if (length(item_rules) > 0) {
+    item_rules_lift <- item_rules[quality(item_rules)$lift > 1.1]
+    
+    if (length(item_rules_lift) > 0) {
+      sorted_rules <- sort(item_rules_lift, by = "lift")
+      return(sorted_rules)
+    }
+  }
+  return(NULL)
+}
+```
+
+```{r}
+if (!is.null(top_product_rules)) {
+  # Create data frame from rules
+  top_product_df <- data.frame(
+    "Product" = labels(lhs(top_product_rules)),
+    "Leads_To_Purchase_Of" = rep(top_product, length(top_product_rules)),
+    "Support_Pct" = round(quality(top_product_rules)$support * 100, 2),
+    "Confidence_Pct" = round(quality(top_product_rules)$confidence * 100, 2),
+    "Lift" = round(quality(top_product_rules)$lift, 2)
+  )
+  
+  # Display table
+  cat("## Products Leading to Purchase of", top_product, "\n\n")
+  knitr::kable(
+    top_product_df,
+    col.names = c("Product", "Leads to Purchase Of", "Support (%)", "Confidence (%)", "Lift"),
+    caption = paste("Products That Lead to", top_product, "Purchases")
+  )
+}
+```
+
+```{r}
+# Save final rules to CSV
+if (!is.null(market_basket_rules)) {
+  rules_df <- data.frame(
+    lhs = labels(lhs(market_basket_rules)),
+    rhs = labels(rhs(market_basket_rules)),
+    support = round(quality(market_basket_rules)$support, 6),
+    confidence = round(quality(market_basket_rules)$confidence, 6),
+    lift = round(quality(market_basket_rules)$lift, 6),
+    count = quality(market_basket_rules)$count
+  )
+  # FIXED: Changed filename to reflect seasonal data
+  write.csv(rules_df, "seasonal_bakery_association_rules.csv", row.names = FALSE)
+}
+```
+
+Additional: # 1. Visualizing Association Rules with Different Plot Types
+```{r}
+# Plot support vs confidence with lift as color
+if (!is.null(market_basket_rules) && length(market_basket_rules) > 0) {
+  # Create scatter plot (returns a ggplot object)
+  scatter_plot <- plot(market_basket_rules, 
+                       method = "scatterplot", 
+                       measure = c("support", "confidence"),
+                       shading = "lift",
+                       main = "Scatter Plot of Association Rules",
+                       jitter = 0.01,
+                       engine = "ggplot2")
+  
+  # Now modify the ggplot object with proper ggplot parameters
+  scatter_plot <- scatter_plot +
+    ggplot2::theme_minimal() +
+    ggplot2::geom_point(size = 3, alpha = 0.7) +  # Larger points with transparency
+    ggplot2::scale_color_gradient(low = "skyblue", high = "blue4") +  # Color gradient
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 14, face = "bold"),
+      axis.title = ggplot2::element_text(size = 12)
+    )
+  
+  # Display the modified plot
+  print(scatter_plot)
+  
+  # Save high-quality version - FIXED: Changed filename to reflect seasonal data
+  ggplot2::ggsave("seasonal_scatter_rules.png", plot = scatter_plot, width = 10, height = 8, dpi = 300)
+}
+```
+
+```{r}
+# Graph visualization of top rules
+if (!is.null(market_basket_rules) && length(market_basket_rules) > 5) {
+  # Limit to a smaller set for clearer visualization
+  top_viz_rules <- head(sort(market_basket_rules, by = "lift"), 10)
+  
+  # Save dimensions for the plot - FIXED: Changed filename to reflect seasonal data
+  png("seasonal_network_rules.png", width = 12, height = 10, units = "in", res = 300)
+  
+  # Graph-based visualization with compatible settings
+  plot(top_viz_rules, 
+       method = "graph", 
+       control = list(
+         layout = "circle",       # Valid layout option
+         max = 10,                # Limit number of rules
+         colors = c("#4682B4", "#A9A9A9")  # Node and edge colors
+       ),
+       main = "Network of Top Association Rules")
+  
+  # Close the device
+  dev.off()
+  
+  # Display the plot in the R document
+  plot(top_viz_rules, 
+       method = "graph", 
+       control = list(
+         layout = "circle",
+         max = 10,
+         colors = c("#4682B4", "#A9A9A9")
+       ),
+       main = "Network of Top Association Rules")
+}
+```
+
+```{r}
+# Grouped matrix visualization
+if (!is.null(market_basket_rules) && length(market_basket_rules) > 0) {
+  # Matrix visualization with minimal settings to prevent overlap
+  plot(market_basket_rules, 
+       method = "grouped", 
+       control = list(
+         k = min(6, length(market_basket_rules)),
+         lhs_label_items = 1,
+         rhs_max = 3
+       ))
+  
+  # Save high-quality version - FIXED: Changed filename to reflect seasonal data
+  png("seasonal_grouped_matrix.png", width = 10, height = 8, units = "in", res = 300)
+  plot(market_basket_rules, 
+       method = "grouped", 
+       control = list(k = min(6, length(market_basket_rules))))
+  dev.off()
+}
+```
+
+Additional: 2. Itemset Frequency Analysis
+```{r}
+# First, analyze the transactions to understand their structure
+basket_sizes <- size(transactions)
+basket_summary <- table(basket_sizes)
+
+# Display basket size distribution
+cat("Transaction Size Distribution:\n")
+print(basket_summary)
+cat("\nPercentage of transactions with single items: ", 
+    round(basket_summary[1] / sum(basket_summary) * 100, 2), "%\n\n")
+
+# Get single item frequencies
+single_items <- apriori(transactions, 
+                      parameter = list(
+                        target = "frequent itemsets", 
+                        support = 0.01, 
+                        minlen = 1,
+                        maxlen = 1
+                      ))
+single_items <- sort(single_items, by = "support", decreasing = TRUE)
+
+# Display single items frequency
+single_items_df <- data.frame(
+  itemsets = labels(items(single_items)),
+  support = quality(single_items)$support,
+  count = quality(single_items)$count
+)
+
+knitr::kable(
+  head(single_items_df, 15),
+  col.names = c("Popular Item", "Support", "Count"),
+  caption = "Most Popular Individual Items",
+  digits = 4
+)
+
+# Try to find any item combinations with a very low support threshold
+cat("\nAttempting to find item combinations with confidence and lift metrics:\n")
+
+# First get itemsets with low support threshold
+min_support <- 0.001  # Very low threshold to catch rare combinations
+combinations <- apriori(transactions, 
+                       parameter = list(
+                         target = "frequent itemsets", 
+                         support = min_support,
+                         minlen = 2,
+                         maxlen = 2  # Limit to pairs for easier rule matching
+                       ))
+
+# Then get rules with the same support threshold to extract confidence and lift
+rules <- apriori(transactions,
+                parameter = list(
+                  support = min_support,
+                  confidence = 0.01,  # Very low confidence to capture all possible rules
+                  minlen = 2,
+                  maxlen = 2
+                ))
+
+if (length(combinations) > 0 && length(rules) > 0) {
+  # Sort combinations by support
+  combinations <- sort(combinations, by = "support", decreasing = TRUE)
+  
+  # Convert to dataframe
+  combinations_df <- data.frame(
+    itemsets = labels(items(combinations)),
+    support = quality(combinations)$support,
+    count = quality(combinations)$support * length(transactions)
+  )
+  
+  # Create columns for confidence and lift
+  combinations_df$confidence <- NA
+  combinations_df$lift <- NA
+  
+  # Convert rules to data frame for easier matching
+  rules_df <- data.frame(
+    lhs = labels(lhs(rules)),
+    rhs = labels(rhs(rules)),
+    confidence = quality(rules)$confidence,
+    lift = quality(rules)$lift
+  )
+  
+  # Extract rule metrics for each combination
+  for (i in 1:nrow(combinations_df)) {
+    # Get the items in the combination
+    items_set <- gsub("[{}]", "", combinations_df$itemsets[i])
+    items <- unlist(strsplit(items_set, ","))
+    items <- trimws(items)
+    
+    if (length(items) == 2) {
+      # Create patterns to match rules in both directions
+      pattern1 <- paste0("\\{", items[1], "\\}")
+      pattern2 <- paste0("\\{", items[2], "\\}")
+      
+      # Find matching rules in both directions
+      matches1 <- which(grepl(pattern1, rules_df$lhs) & grepl(pattern2, rules_df$rhs))
+      matches2 <- which(grepl(pattern2, rules_df$lhs) & grepl(pattern1, rules_df$rhs))
+      
+      # Use the rule with the highest confidence if both directions exist
+      if (length(matches1) > 0 && length(matches2) > 0) {
+        conf1 <- max(rules_df$confidence[matches1])
+        conf2 <- max(rules_df$confidence[matches2])
+        
+        if (conf1 >= conf2) {
+          best_match <- matches1[which.max(rules_df$confidence[matches1])]
+          combinations_df$confidence[i] <- rules_df$confidence[best_match]
+          combinations_df$lift[i] <- rules_df$lift[best_match]
+        } else {
+          best_match <- matches2[which.max(rules_df$confidence[matches2])]
+          combinations_df$confidence[i] <- rules_df$confidence[best_match]
+          combinations_df$lift[i] <- rules_df$lift[best_match]
+        }
+      } else if (length(matches1) > 0) {
+        best_match <- matches1[which.max(rules_df$confidence[matches1])]
+        combinations_df$confidence[i] <- rules_df$confidence[best_match]
+        combinations_df$lift[i] <- rules_df$lift[best_match]
+      } else if (length(matches2) > 0) {
+        best_match <- matches2[which.max(rules_df$confidence[matches2])]
+        combinations_df$confidence[i] <- rules_df$confidence[best_match]
+        combinations_df$lift[i] <- rules_df$lift[best_match]
+      }
+    }
+  }
+  
+  # Clean up the data: round numeric values and remove rows with NA metrics
+  combinations_df$support <- round(combinations_df$support, 4)
+  combinations_df$count <- round(combinations_df$count)
+  combinations_df$confidence <- round(combinations_df$confidence, 4)
+  combinations_df$lift <- round(combinations_df$lift, 4)
+  combinations_df <- combinations_df[!is.na(combinations_df$confidence), ]
+  
+  # Display combinations with metrics
+  knitr::kable(
+    head(combinations_df, 15),
+    col.names = c("Item Combination", "Support", "Count", "Confidence", "Lift"),
+    caption = paste0("Item Combinations with Confidence and Lift (Support >= ", min_support, ")"),
+    digits = 4
+  )
+  
+  # Also display combinations sorted by lift
+  combinations_by_lift <- combinations_df[order(-combinations_df$lift), ]
+  
+  knitr::kable(
+    head(combinations_by_lift, 15),
+    col.names = c("Item Combination", "Support", "Count", "Confidence", "Lift"),
+    caption = "Item Combinations Sorted by Lift",
+    digits = 4
+  )
+} else {
+  cat("No combinations found even with a support threshold of", min_support, "\n")
+  cat("This dataset appears to consist almost entirely of single-item transactions.\n")
+}
+```
+
+# Analyze which items are most likely to be purchased together when multi-item transactions occur
+multi_item_transactions <- transactions[basket_sizes > 1]
+
+if (length(multi_item_transactions) > 0) {
+  cat("\n\nAnalyzing the", length(multi_item_transactions), "multi-item transactions:\n")
+  
+  # Create rules from these transactions to get confidence and lift
+  multi_item_rules <- apriori(multi_item_transactions, 
+                             parameter = list(
+                               support = 0.05,  # Higher relative support within this subset
+                               confidence = 0.1,
+                               minlen = 2,
+                               maxlen = 2
+                             ))
+  
+  if (length(multi_item_rules) > 0) {
+    # Sort by lift for strongest associations
+    multi_item_rules <- sort(multi_item_rules, by = "lift", decreasing = TRUE)
+    
+    # Convert to dataframe
+    multi_rules_df <- data.frame(
+      lhs = labels(lhs(multi_item_rules)),
+      rhs = labels(rhs(multi_item_rules)),
+      support = quality(multi_item_rules)$support,
+      confidence = quality(multi_item_rules)$confidence,
+      lift = quality(multi_item_rules)$lift,
+      count = quality(multi_item_rules)$count
+    )
+    
+    # Display rules
+    knitr::kable(
+      head(multi_rules_df, 10),
+      col.names = c("If Customer Buys", "They Also Buy", "Support", "Confidence", "Lift", "Count"),
+      caption = "Strongest Associations in Multi-Item Transactions (by Lift)",
+      digits = 4
+    )
+    
+    # Also show by support
+    multi_rules_by_support <- sort(multi_item_rules, by = "support", decreasing = TRUE)
+    multi_support_df <- data.frame(
+      lhs = labels(lhs(multi_rules_by_support)),
+      rhs = labels(rhs(multi_rules_by_support)),
+      support = quality(multi_rules_by_support)$support,
+      confidence = quality(multi_rules_by_support)$confidence,
+      lift = quality(multi_rules_by_support)$lift,
+      count = quality(multi_rules_by_support)$count
+    )
+    
+    knitr::kable(
+      head(multi_support_df, 10),
+      col.names = c("If Customer Buys", "They Also Buy", "Support", "Confidence", "Lift", "Count"),
+      caption = "Most Common Associations in Multi-Item Transactions (by Support)",
+      digits = 4
+    )
+  } else {
+    cat("No common associations found even in multi-item transactions.\n")
+  }
+  
+  # Show a few examples of multi-item transactions
+  cat("\nExamples of multi-item transactions:\n")
+  multi_item_list <- as(multi_item_transactions, "list")
+  for (i in 1:min(5, length(multi_item_list))) {
+    cat("Transaction", i, ":", paste(multi_item_list[[i]], collapse=", "), "\n")
+  }
+} else {
+  cat("\nThere are no multi-item transactions in this dataset.\n")
+}
+```
+```
+
+
+
+Additional: 3. Product Affinity Analysis
+```{r}
+# Create item frequency data
+item_frequency <- itemFrequency(transactions)
+item_freq_sorted <- sort(item_frequency, decreasing = TRUE)
+
+# FIXED VISUALIZATION - More readable barplot of top items
+# Get only top 15 items to prevent overcrowding
+top_items <- head(item_freq_sorted, 15)
+
+# Create a dataframe for better ggplot visualization
+top_items_df <- data.frame(
+  item = names(top_items),
+  frequency = as.numeric(top_items)
+) %>%
+  # Sort by frequency
+  arrange(desc(frequency)) %>%
+  # Shorten names if needed (first 25 characters)
+  mutate(short_name = ifelse(nchar(item) > 25, 
+                             paste0(substr(item, 1, 22), "..."), 
+                             item))
+
+# Create a better-looking plot with ggplot
+ggplot(top_items_df, aes(x = reorder(short_name, frequency), y = frequency)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +  # Flip to horizontal to prevent label overlap
+  labs(
+    title = "Frequency of Top 15 Products",
+    x = "Products",
+    y = "Frequency",
+    caption = "Note: Product names may be truncated for display"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 10),  # Larger text for product names
+    plot.title = element_text(size = 14, face = "bold"),
+    panel.grid.minor = element_blank()  # Remove minor grid lines
+  )
+
+# Optionally save a high-quality version - FIXED: Changed filename to reflect seasonal data
+ggsave("seasonal_product_frequency.png", width = 10, height = 8)
+```
+
+Additional: 4. Item Pairs Analysis with Lift
+
+```{r}
+library(igraph)
+# Create custom pairs analysis function
+analyze_item_pairs <- function(transactions, min_support = 0.005) {
+  # Find all 2-item rules
+  item_pairs <- apriori(
+    transactions,
+    parameter = list(
+      support = min_support,
+      confidence = 0.1,
+      minlen = 2,
+      maxlen = 2
+    )
+  )
+  
+  if (length(item_pairs) > 0) {
+    # Filter by lift
+    significant_pairs <- item_pairs[quality(item_pairs)$lift > 1.5]
+    
+    if (length(significant_pairs) > 0) {
+      # Sort by lift
+      sorted_pairs <- sort(significant_pairs, by = "lift", decreasing = TRUE)
+      return(sorted_pairs)
+    }
+  }
+  return(NULL)
+}
+
+# Run the item pairs analysis
+item_pair_rules <- analyze_item_pairs(transactions)
+
+# Display pairs using an alternative visualization approach
+if (!is.null(item_pair_rules) && length(item_pair_rules) > 0) {
+  # Create a data frame from the rules instead of a matrix
+  lift_data <- data.frame()
+  
+  for (i in 1:length(item_pair_rules)) {
+    lhs_item <- gsub("[{}]", "", labels(lhs(item_pair_rules[i])))
+    rhs_item <- gsub("[{}]", "", labels(rhs(item_pair_rules[i])))
+    lift_value <- quality(item_pair_rules[i])$lift
+    
+    # Add to data frame
+    lift_data <- rbind(lift_data, 
+                       data.frame(item1 = lhs_item, 
+                                 item2 = rhs_item, 
+                                 lift = lift_value,
+                                 stringsAsFactors = FALSE))
+  }
+  
+  # Take only top relationships by lift for clearer visualization
+  top_relationships <- head(lift_data[order(-lift_data$lift),], 20)
+  
+  # ALTERNATIVE 1: Create a table instead of a heatmap
+  knitr::kable(
+    top_relationships,
+    col.names = c("Product 1", "Product 2", "Lift"),
+    caption = "Top Product Pair Associations by Lift",
+    digits = 2
+  )
+  
+  # ALTERNATIVE 2: Create a bar chart of top relationships
+  library(ggplot2)
+  
+  # Combine product names for display
+  top_relationships$pair <- paste(substr(top_relationships$item1, 1, 20), "→", 
+                                 substr(top_relationships$item2, 1, 20))
+  
+  # Take top 10 for better readability
+  plot_data <- head(top_relationships, 10)
+  
+  # Create plot
+  lift_plot <- ggplot(plot_data, aes(x = reorder(pair, lift), y = lift)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    coord_flip() +
+    labs(
+      title = "Top Product Associations by Lift",
+      x = NULL,
+      y = "Lift Value"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 9),
+      plot.title = element_text(size = 12, face = "bold")
+    )
+  
+  # Display the plot
+  print(lift_plot)
+  
+  # Save the plot
+  ggsave("seasonal_top_associations.png", plot = lift_plot, width = 10, height = 6, dpi = 300)
+  
+  # ALTERNATIVE 3: Network visualization for top pairs
+  # Instead of trying to plot all pairs, focus on top associations
+  if (requireNamespace("igraph", quietly = TRUE)) {
+    library(igraph)
+    
+    # Create edge list from top relationships
+    edges <- top_relationships[, c("item1", "item2", "lift")]
+    names(edges) <- c("from", "to", "weight")
+    
+    # Create graph
+    g <- graph_from_data_frame(edges, directed = TRUE)
+    
+    # Set edge width based on lift
+    E(g)$width <- edges$weight / max(edges$weight) * 5
+    
+    # Set node size based on degree (number of connections)
+    V(g)$size <- degree(g) * 3 + 5
+    
+    # Plot network
+    png("seasonal_association_network.png", width = 10, height = 8, units = "in", res = 120)
+    plot(g, 
+         layout = layout_with_fr(g),
+         edge.arrow.size = 0.5,
+         vertex.label.cex = 0.8,
+         vertex.color = "lightblue",
+         edge.color = "gray50",
+         main = "Product Association Network")
+    dev.off()
+    
+    # Plot in the document
+    plot(g, 
+         layout = layout_with_fr(g),
+         edge.arrow.size = 0.5,
+         vertex.label.cex = 0.8,
+         vertex.color = "lightblue",
+         edge.color = "gray50",
+         main = "Product Association Network")
+  }
+}
+```
+
+
+Additional: 6. Enhanced Market Basket Metrics
+
+```{r}
+# Calculate additional metrics for product associations
+if (!is.null(market_basket_rules) && length(market_basket_rules) > 0) {
+  # Create the basic metrics dataframe first
+  enhanced_metrics <- data.frame(
+    lhs = labels(lhs(market_basket_rules)),
+    rhs = labels(rhs(market_basket_rules)),
+    support = quality(market_basket_rules)$support,
+    confidence = quality(market_basket_rules)$confidence,
+    lift = quality(market_basket_rules)$lift
+  )
+  
+  # Add count if available
+  if (!is.null(quality(market_basket_rules)$count)) {
+    enhanced_metrics$count <- quality(market_basket_rules)$count
+  }
+  
+  # Try adding conviction
+  tryCatch({
+    enhanced_metrics$conviction <- quality(market_basket_rules)$conviction
+  }, error = function(e) {
+    cat("Note: Conviction metric calculation failed.\n")
+  })
+  
+  # Try adding leverage
+  tryCatch({
+    enhanced_metrics$leverage <- interestMeasure(market_basket_rules, 
+                                              measure = "leverage", 
+                                              transactions = transactions)
+  }, error = function(e) {
+    cat("Note: Leverage metric calculation failed.\n")
+  })
+  
+  # Try adding kulczynski
+  tryCatch({
+    enhanced_metrics$kulczynski <- interestMeasure(market_basket_rules, 
+                                                measure = "kulczynski", 
+                                                transactions = transactions)
+  }, error = function(e) {
+    cat("Note: Kulczynski metric calculation failed.\n")
+  })
+  
+  # Sort by lift
+  enhanced_metrics <- enhanced_metrics %>% arrange(desc(lift))
+  
+  # Display top rules
+  # Create nicer display names for the columns
+  display_names <- colnames(enhanced_metrics)
+  display_names[display_names == "lhs"] <- "If Customer Buys"
+  display_names[display_names == "rhs"] <- "Recommend"
+  display_names[display_names == "support"] <- "Support"
+  display_names[display_names == "confidence"] <- "Confidence"
+  display_names[display_names == "lift"] <- "Lift"
+  display_names[display_names == "count"] <- "Count"
+  display_names[display_names == "conviction"] <- "Conviction" 
+  display_names[display_names == "leverage"] <- "Leverage"
+  display_names[display_names == "kulczynski"] <- "Kulczynski"
+  
+  # Display top rules
+  knitr::kable(
+    head(enhanced_metrics, 10),
+    col.names = display_names,
+    caption = "Top Product Associations by Lift",
+    digits = 4
+  )
+  
+  # Optional: Create and display a table with rules sorted by confidence
+  if(nrow(enhanced_metrics) > 10) {
+    cat("\n\nTop Rules Sorted by Confidence:\n")
+    confidence_rules <- enhanced_metrics %>% arrange(desc(confidence))
+    knitr::kable(
+      head(confidence_rules, 10),
+      col.names = display_names,
+      caption = "Top Product Associations by Confidence",
+      digits = 4
+    )
+  }
+}
+```
+
+Additional: 7. Basket Size Analysis
+```{r}
+# Analyze basket sizes
+basket_sizes <- size(transactions)
+
+# Summarize basket sizes
+basket_summary <- data.frame(
+  Size = 1:max(basket_sizes),
+  Frequency = tabulate(basket_sizes, nbins = max(basket_sizes))
+)
+
+# Calculate percentages
+basket_summary$Percentage <- basket_summary$Frequency / length(transactions) * 100
+
+# Display basket size distribution
+knitr::kable(
+  basket_summary,
+  col.names = c("Items per Basket", "Number of Baskets", "Percentage"),
+  caption = "Distribution of Basket Sizes for Seasonal Products",
+  digits = 2
+)
+
+# IMPROVED VISUALIZATION - Fix for overlap in basket size plot
+# For baskets with size > 10, group them as "11+"
+if(max(basket_sizes) > 10) {
+  large_baskets <- basket_summary[basket_summary$Size > 10, ]
+  compressed_summary <- basket_summary[basket_summary$Size <= 10, ]
+  compressed_summary <- rbind(
+    compressed_summary,
+    data.frame(
+      Size = 11,
+      Frequency = sum(large_baskets$Frequency),
+      Percentage = sum(large_baskets$Percentage)
+    )
+  )
+  size_labels <- c(as.character(1:10), "11+")
+} else {
+  compressed_summary <- basket_summary
+  size_labels <- as.character(1:max(basket_sizes))
+}
+
+# Create data frame for plotting
+plot_data <- data.frame(
+  Size = factor(size_labels, levels = size_labels),
+  Count = compressed_summary$Frequency,
+  Percentage = compressed_summary$Percentage
+)
+
+# Create ggplot
+basket_size_plot <- ggplot(plot_data, aes(x = Size, y = Count)) +
+  geom_bar(stat = "identity", fill = "steelblue", width = 0.7) +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")), 
+            vjust = -0.5, size = 3.5) +
+  labs(
+    title = "Distribution of Items per Basket - Seasonal Products",
+    x = "Number of Items",
+    y = "Number of Baskets"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 0)
+  )
+
+# Display the plot
+print(basket_size_plot)
+
+# Save the plot
+ggsave("seasonal_basket_distribution.png", plot = basket_size_plot, width = 10, height = 8, dpi = 300)
+
+# Additional analysis: Calculate average basket size
+avg_basket_size <- mean(basket_sizes)
+cat("\nAverage items per basket in seasonal transactions:", round(avg_basket_size, 2), "\n")
+
+# Calculate percentage of single-item transactions
+single_item_pct <- basket_summary$Percentage[1]
+cat("Percentage of single-item transactions:", round(single_item_pct, 2), "%\n")
+```
